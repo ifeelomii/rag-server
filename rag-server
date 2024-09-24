@@ -1,0 +1,125 @@
+import pandas as pd
+import os
+from sentence_transformers import SentenceTransformer
+import faiss
+import groq
+from groq import Groq
+from docx import Document
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+ 
+
+app = Flask(__name__)
+
+# Enable CORS for the entire app
+CORS(app)
+ 
+sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+ 
+# Load data from different file formats in a folder
+def load_data_from_folder(folder_path):
+    combined_data = []
+    for file_name in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, file_name)
+        if file_name.endswith('.csv'):
+            combined_data.append(pd.read_csv(file_path))
+        elif file_name.endswith('.xlsx'):
+            combined_data.append(pd.read_excel(file_path))
+        elif file_name.endswith('.docx'):
+            combined_data.append(read_docx(file_path))
+        else:
+            print(f"Unsupported file format: {file_name}")
+    return combined_data
+ 
+# Read .docx file
+def read_docx(file_path):
+    doc = Document(file_path)
+    text = []
+    for paragraph in doc.paragraphs:
+        text.append(paragraph.text)
+    return "\n".join(text)
+ 
+ 
+def print_combined_data(combined_data):
+    for index, item in enumerate(combined_data):
+        print(f"\n--- Data from file {index + 1} ---\n")
+        if isinstance(item, pd.DataFrame):
+            print(item)
+        elif isinstance(item, str):
+            print(item)  # Print text for DOCX files
+ 
+ 
+folder_path = r'C:\Users\LENOVO\Desktop\RagUI\OnCall_Support'
+combined_data = load_data_from_folder(folder_path)
+# print_combined_data(combined_data)
+ 
+ 
+ 
+# Generate embeddings for the documents
+embeddings = sentence_model.encode(combined_data, convert_to_tensor=True)
+ 
+# Build the FAISS index
+index = faiss.IndexFlatL2(embeddings.shape[1])
+index.add(embeddings.numpy())
+ 
+# Function to retrieve relevant schema information
+def retrieve(query, top_k=5):
+    query_embedding = sentence_model.encode([query], convert_to_tensor=True)
+    D, I = index.search(query_embedding.numpy(), top_k)
+    results = [combined_data[idx] for idx in I[0]]
+    return results
+ 
+# Initialize Groq client (Replace API key with your actual API key)
+api_key = "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"
+client = Groq(api_key=api_key)
+ 
+# Function to generate a prompt for Groq
+def generate_prompt(nl_query, retrieved_context):
+    return f"""
+    You have data gathered from various on-call engineers, which includes details about exceptions raised in different environments, such as integration (integ) and production (prod). Each exception is documented by the engineer who was on-call during that period. The on-call engineers' data includes their start and end dates, which indicate the duration of their on-call duties. For each exception, the information recorded includes the exception message, the action taken, the owner responsible for resolving it, and the date the exception occurred. The owner is the individual who addresses the issue and submits a pull request (PR) for resolution. The data may also include the PR number associated with the fix, as well as the root cause of the exception. Do not give answer out of provided context
+   
+    context:
+    {retrieved_context}
+   
+    Natural Language Query:
+    {nl_query}
+   
+    """
+ 
+# Function to translate natural language query using Groq
+def answer_with_groq(nl_query, retrieved_context):
+    prompt = generate_prompt(nl_query, retrieved_context)
+    response = client.chat.completions.create(
+        model="llama3-8b-8192",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant. give me answer using context. Do not give answer out of provided context"},
+            {"role": "user", "content": prompt}
+        ]
+    )
+ 
+    message_content = response.choices[0].message.content
+ 
+   
+    return message_content
+ 
+ 
+# # Endpoint to handle the question
+@app.route('/ask', methods=['POST'])
+def ask_question():
+    data = request.json
+    nl_query = data.get('query', '')
+   
+    if not nl_query:
+        return jsonify({'error': 'Query is required'}), 400
+    print(f"nl_query is >>> : {nl_query}")
+    # Retrieve context and generate response
+    retrieved_context = " ".join(retrieve(nl_query))
+    print(f"retrived context is >>> : {retrieved_context}")
+    generated_response = answer_with_groq(nl_query, retrieved_context)
+    print(f"generated response is >>> : {generated_response}")
+ 
+    return jsonify({'response': generated_response})
+ 
+if __name__ == '__main__':
+    # Start the Flask application
+    app.run(debug=True)
